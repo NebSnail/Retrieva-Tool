@@ -9,6 +9,8 @@ venv/
 # Build artifacts
 build/
 dist/
+build_*/
+dist_*/
 *.spec.bak
 检索工具.spec
 

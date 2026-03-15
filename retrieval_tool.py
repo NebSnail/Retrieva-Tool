@@ -26,7 +26,7 @@ QUERY_INPUT_WIDTH = 12
 TYPE_ICON_TARGET_SIZE = 120
 APP_ICON_FILE = "logo.png"
 TYPES_CONFIG_FILE = "types_config.json"
-APP_VERSION = "0.2.260315"
+APP_VERSION = "0.4.260316"
 APP_FOOTER_TEXT = f"Powered by GPT & ZL | v{APP_VERSION}"
 # types_config.json 新格式字段：
 # - _data: 实际类型配置
