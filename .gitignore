@@ -10,6 +10,7 @@ venv/
 build/
 dist/
 *.spec.bak
+检索工具.spec
 
 # OS files
 .DS_Store

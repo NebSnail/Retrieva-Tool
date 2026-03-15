@@ -24,7 +24,7 @@ SETTINGS_WINDOW_HEIGHT = 420
 TABLE_COLUMN_WIDTH = 120
 QUERY_INPUT_WIDTH = 12
 TYPE_ICON_TARGET_SIZE = 120
-APP_ICON_FILE = "tool.png"
+APP_ICON_FILE = "logo.png"
 TYPES_CONFIG_FILE = "types_config.json"
 APP_VERSION = "0.2.260315"
 APP_FOOTER_TEXT = f"Powered by GPT & ZL | v{APP_VERSION}"
@@ -499,7 +499,7 @@ def run_interactive(headers: List[str], records: List[Dict[str, str]]) -> None:
         print("-" * 50)
 
 
-def launch_gui(default_excel: Path) -> None:
+def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
     # GUI 主入口：类型管理、动态查询项、结果展示与复制能力
     root = tk.Tk()
     root.withdraw()
@@ -518,7 +518,7 @@ def launch_gui(default_excel: Path) -> None:
     root.geometry(f"{window_w}x{window_h}+{pos_x}+{pos_y}")
     root.deiconify()
 
-    # 程序标题栏图标：默认读取程序根目录下的 tool.png
+    # 程序标题栏图标：默认读取程序根目录下的 logo.png
     app_icon_image: Optional[tk.PhotoImage] = None
     icon_path = get_resource_path(APP_ICON_FILE)
     if icon_path.exists():
@@ -905,6 +905,30 @@ def launch_gui(default_excel: Path) -> None:
             messagebox.showerror("缺少依赖", "未安装 openpyxl，请先安装后再加载。")
             return False
 
+    def load_data_from_path(path: Path, source_label: str) -> bool:
+        # 允许通过命令行参数直接指定 Excel，并在 GUI 启动后自动加载。
+        nonlocal records, query_indexes, loaded_type_name
+        try:
+            headers, records = load_records(path)
+            update_table_headers(headers)
+            rebuild_query_inputs(headers)
+            query_indexes = build_query_indexes(records, get_query_headers(headers))
+            render_rows(records)
+            loaded_type_name = ""
+            update_type_icon(loaded_type_name)
+            status_var.set(f"已通过{source_label}加载数据，共 {len(records)} 条记录")
+            return True
+        except (FileNotFoundError, PermissionError, ValueError, OSError) as exc:
+            records = []
+            status_var.set("加载失败，请检查设置与文件。")
+            messagebox.showerror("加载失败", str(exc))
+            return False
+        except (ModuleNotFoundError, ImportError):
+            records = []
+            status_var.set("加载失败：缺少 openpyxl 依赖。")
+            messagebox.showerror("缺少依赖", "未安装 openpyxl，请先安装后再加载。")
+            return False
+
     def on_type_selected(_event: tk.Event) -> None:
         nonlocal records, query_indexes
         # 切换类型时清空旧结果，防止用户误把旧数据当成新类型数据。
@@ -1170,6 +1194,9 @@ def launch_gui(default_excel: Path) -> None:
     else:
         status_var.set("暂无类型，请点击“设置”新增。")
 
+    if prefer_default_excel:
+        load_data_from_path(default_excel, "命令行参数")
+
     root.mainloop()
 
 
@@ -1197,6 +1224,7 @@ def main() -> None:
         help="运行开发自检（前导0、小数查询、损坏配置回退）",
     )
     args = parser.parse_args()
+    excel_argument_provided = args.excel != parser.get_default("excel")
 
     if args.self_check:
         if not run_self_check():
@@ -1234,7 +1262,7 @@ def main() -> None:
         headers, records = load_records(excel_path)
         run_interactive(headers, records)
     else:
-        launch_gui(excel_path)
+        launch_gui(excel_path, prefer_default_excel=excel_argument_provided)
 
 
 if __name__ == "__main__":
@@ -1242,3 +1270,4 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         print(f"程序执行失败: {exc}")
+        raise SystemExit(1)

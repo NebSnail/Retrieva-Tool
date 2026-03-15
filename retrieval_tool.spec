@@ -5,7 +5,7 @@ a = Analysis(
     ['retrieval_tool.py'],
     pathex=[],
     binaries=[],
-    datas=[('tool.png', '.'), ('types_config.json', '.')],
+    datas=[('logo.png', '.'), ('types_config.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -21,7 +21,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='通用件查询工具',
+    name='检索工具',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -32,7 +32,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['tool.png'],
+    icon=['logo.png'],
 )
 coll = COLLECT(
     exe,
@@ -41,5 +41,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='通用件查询工具',
+    name='检索工具',
 )

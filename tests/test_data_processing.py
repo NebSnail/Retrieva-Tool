@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+import sys
 
 try:
     from openpyxl import Workbook
@@ -139,6 +140,20 @@ class TestDataProcessing(unittest.TestCase):
             self.assertEqual(mapping, {})
             self.assertTrue(warning)
             self.assertIn("手动修改", warning)
+
+    def test_main_uses_excel_arg_for_gui_preload(self):
+        with mock.patch.object(retrieval_tool, "launch_gui") as launch_gui_mock:
+            with mock.patch.object(sys, "argv", ["retrieval_tool.py", "--excel", "custom.xlsx"]):
+                retrieval_tool.main()
+
+        launch_gui_mock.assert_called_once_with(Path("custom.xlsx"), prefer_default_excel=True)
+
+    def test_main_default_gui_does_not_force_preload(self):
+        with mock.patch.object(retrieval_tool, "launch_gui") as launch_gui_mock:
+            with mock.patch.object(sys, "argv", ["retrieval_tool.py"]):
+                retrieval_tool.main()
+
+        launch_gui_mock.assert_called_once_with(Path("杠铃汇总.xlsx"), prefer_default_excel=False)
 
 
 if __name__ == "__main__":
