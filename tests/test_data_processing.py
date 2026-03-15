@@ -1,12 +1,20 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from openpyxl import Workbook
+try:
+    from openpyxl import Workbook
+except (ModuleNotFoundError, ImportError):
+    Workbook = None
+
+import retrieval_tool
 
 from retrieval_tool import (
     build_query_indexes,
     dump_signed_type_mapping,
+    get_preferred_config_path,
     get_icon_subsample_scale,
     get_candidate_indexes,
     get_query_headers,
@@ -26,6 +34,7 @@ class TestDataProcessing(unittest.TestCase):
     def test_normalize_value_decimal_and_leading_zero(self):
         self.assertEqual(normalize_value("1200.50"), "1200.5")
         self.assertEqual(normalize_value("037332314020"), "037332314020")
+        self.assertEqual(normalize_value("-0.0"), "0")
 
     def test_query_with_index_candidates(self):
         records = [
@@ -45,6 +54,7 @@ class TestDataProcessing(unittest.TestCase):
         self.assertEqual(get_icon_subsample_scale(239, 239, 120), 2)
         self.assertEqual(get_icon_subsample_scale(240, 240, 120), 2)
 
+    @unittest.skipIf(Workbook is None, "openpyxl is not installed")
     def test_load_records_preserves_leading_zero_by_cell_format(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             excel_path = Path(tmp_dir) / "sample.xlsx"
@@ -78,6 +88,26 @@ class TestDataProcessing(unittest.TestCase):
             config_path.write_text("{invalid_json", encoding="utf-8")
             config = load_type_mapping_from_file_path(config_path)
             self.assertEqual(config, {})
+
+    def test_get_preferred_config_path_falls_back_to_user_dir(self):
+        with tempfile.TemporaryDirectory() as app_dir, tempfile.TemporaryDirectory() as user_dir:
+            app_base = Path(app_dir)
+            user_base = Path(user_dir)
+
+            with mock.patch.object(retrieval_tool, "get_app_base_dir", return_value=app_base), mock.patch.object(
+                retrieval_tool,
+                "get_user_config_dir",
+                return_value=user_base,
+            ):
+                config_path = get_preferred_config_path()
+
+            expected_path = user_base / "types_config.json"
+            self.assertEqual(config_path, expected_path)
+            self.assertTrue(config_path.exists())
+
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("_data"), {})
+            self.assertTrue(payload.get("_signature"))
 
     def test_config_loader_rejects_partial_signed_fields(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

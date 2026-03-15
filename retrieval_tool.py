@@ -3,6 +3,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -73,6 +74,42 @@ def ensure_config_file(config_path: Path) -> None:
             shutil.copy2(bundled_config, config_path)
         except OSError:
             pass
+
+
+def get_user_config_dir() -> Path:
+    """Return per-user writable directory for app config."""
+    if sys.platform.startswith("win"):
+        base_dir = Path.home()
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            base_dir = Path(local_app_data)
+        return base_dir / "RetrievalTool"
+
+    return Path.home() / ".config" / "retrieval_tool"
+
+
+def get_user_config_path() -> Path:
+    return get_user_config_dir() / TYPES_CONFIG_FILE
+
+
+def get_preferred_config_path() -> Path:
+    """Pick app dir config when possible, otherwise fallback to user-writable path."""
+    app_config_path = get_app_base_dir() / TYPES_CONFIG_FILE
+    ensure_config_file(app_config_path)
+    if app_config_path.exists():
+        return app_config_path
+
+    try:
+        user_config_dir = get_user_config_dir()
+        user_config_dir.mkdir(parents=True, exist_ok=True)
+        user_config_path = get_user_config_path()
+        ensure_config_file(user_config_path)
+        if not user_config_path.exists():
+            user_config_path.write_text(dump_signed_type_mapping({}), encoding="utf-8")
+        return user_config_path
+    except OSError:
+        # 用户目录不可写时回退到程序目录（可能不存在，后续按空配置处理）。
+        return app_config_path
 
 
 def get_query_headers(headers: List[str]) -> List[str]:
@@ -203,7 +240,8 @@ def normalize_value(value) -> str:
         return text
 
     if number == number.to_integral_value():
-        return str(number.quantize(Decimal(1)))
+        integer_text = str(number.quantize(Decimal(1)))
+        return "0" if integer_text in {"-0", "+0"} else integer_text
 
     normalized = format(number.normalize(), "f")
     if "." in normalized:
@@ -310,12 +348,17 @@ def query_records(
     if candidate_indexes is None:
         candidate_rows = records
     else:
-        candidate_rows = [records[idx] for idx in candidate_indexes if 0 <= idx < len(records)]
+        record_count = len(records)
+        candidate_rows = (records[idx] for idx in candidate_indexes if 0 <= idx < record_count)
 
     def matches(row: Dict[str, str]) -> bool:
         # 多条件“且”匹配：任一条件不满足即排除
         for key, value in normalized_conditions.items():
-            if normalize_value(row.get(key)) != value:
+            raw_cell = row.get(key, "")
+            # 大多数情况下记录值本身已是规范格式，先做直接比较可减少规范化开销。
+            if raw_cell == value:
+                continue
+            if normalize_value(raw_cell) != value:
                 return False
         return True
 
@@ -460,7 +503,7 @@ def launch_gui(default_excel: Path) -> None:
     # GUI 主入口：类型管理、动态查询项、结果展示与复制能力
     root = tk.Tk()
     root.withdraw()
-    root.title("通用件查询工具")
+    root.title("检索工具")
     root.geometry(MAIN_WINDOW_SIZE)
     # 先隐藏窗口，算好最终位置后再显示，避免“先在别处闪一下”。
     root.update_idletasks()
@@ -499,8 +542,7 @@ def launch_gui(default_excel: Path) -> None:
     current_sort_column: Optional[str] = None
     current_sort_is_desc: bool = False
     query_vars: Dict[str, tk.StringVar] = {}
-    config_path = get_app_base_dir() / TYPES_CONFIG_FILE
-    ensure_config_file(config_path)
+    config_path = get_preferred_config_path()
     type_mapping: Dict[str, Dict[str, str]] = {}
     type_var = tk.StringVar()
     status_var = tk.StringVar(value="请先在“设置”中配置类型。")
@@ -632,8 +674,27 @@ def launch_gui(default_excel: Path) -> None:
         # 兼容旧配置格式：{"名称": "excel路径"}
         return load_type_mapping_with_status(config_path)
 
-    def save_type_mapping_to_file() -> None:
-        config_path.write_text(dump_signed_type_mapping(type_mapping), encoding="utf-8")
+    def save_type_mapping_to_file(mapping_to_save: Dict[str, Dict[str, str]]) -> bool:
+        nonlocal config_path
+        payload = dump_signed_type_mapping(mapping_to_save)
+        try:
+            config_path.write_text(payload, encoding="utf-8")
+            return True
+        except OSError:
+            # 程序目录不可写时，回退到用户目录保存。
+            fallback_path = get_user_config_path()
+            try:
+                fallback_path.parent.mkdir(parents=True, exist_ok=True)
+                fallback_path.write_text(payload, encoding="utf-8")
+                config_path = fallback_path
+                messagebox.showwarning(
+                    "配置路径已切换",
+                    f"当前目录不可写，已切换到用户目录保存配置:\n{fallback_path}",
+                )
+                return True
+            except OSError as exc:
+                messagebox.showerror("保存失败", f"配置保存失败: {exc}")
+                return False
 
     def get_type_excel_path(name: str) -> str:
         return type_mapping.get(name, {}).get("excel", "").strip()
@@ -838,6 +899,11 @@ def launch_gui(default_excel: Path) -> None:
             status_var.set("加载失败，请检查设置与文件。")
             messagebox.showerror("加载失败", str(exc))
             return False
+        except (ModuleNotFoundError, ImportError):
+            records = []
+            status_var.set("加载失败：缺少 openpyxl 依赖。")
+            messagebox.showerror("缺少依赖", "未安装 openpyxl，请先安装后再加载。")
+            return False
 
     def on_type_selected(_event: tk.Event) -> None:
         nonlocal records, query_indexes
@@ -977,6 +1043,7 @@ def launch_gui(default_excel: Path) -> None:
             name = setting_name_var.get().strip()
             excel = setting_path_var.get().strip()
             icon = setting_icon_var.get().strip()
+            next_loaded_type_name = loaded_type_name
 
             if not name:
                 messagebox.showwarning("输入不完整", "请填写名称。", parent=settings_window)
@@ -986,22 +1053,30 @@ def launch_gui(default_excel: Path) -> None:
                 return
 
             selected = setting_table.selection()
+            new_mapping = {
+                key: {"excel": value.get("excel", ""), "icon": value.get("icon", "")}
+                for key, value in type_mapping.items()
+            }
             if selected:
                 old_name = str(setting_table.item(selected[0], "values")[0]).strip()
-                if old_name != name and name in type_mapping:
+                if old_name != name and name in new_mapping:
                     messagebox.showwarning("名称重复", "该名称已存在，请使用其他名称。", parent=settings_window)
                     return
-                if old_name in type_mapping:
-                    del type_mapping[old_name]
+                if old_name in new_mapping:
+                    del new_mapping[old_name]
                 if loaded_type_name == old_name:
-                    loaded_type_name = name
+                    next_loaded_type_name = name
             else:
-                if name in type_mapping:
+                if name in new_mapping:
                     messagebox.showwarning("名称重复", "该名称已存在，请使用其他名称。", parent=settings_window)
                     return
 
-            type_mapping[name] = {"excel": excel, "icon": icon}
-            save_type_mapping_to_file()
+            new_mapping[name] = {"excel": excel, "icon": icon}
+            if not save_type_mapping_to_file(new_mapping):
+                return
+            type_mapping.clear()
+            type_mapping.update(new_mapping)
+            loaded_type_name = next_loaded_type_name
             refresh_setting_table(name)
             refresh_type_options(name)
             update_type_icon(loaded_type_name)
@@ -1015,14 +1090,23 @@ def launch_gui(default_excel: Path) -> None:
                 return
 
             name = str(setting_table.item(selected[0], "values")[0]).strip()
+            next_loaded_type_name = loaded_type_name
             if not messagebox.askyesno("确认删除", f"确定删除类型“{name}”吗？", parent=settings_window):
                 return
 
-            if name in type_mapping:
-                del type_mapping[name]
+            new_mapping = {
+                key: {"excel": value.get("excel", ""), "icon": value.get("icon", "")}
+                for key, value in type_mapping.items()
+            }
+            if name in new_mapping:
+                del new_mapping[name]
             if loaded_type_name == name:
-                loaded_type_name = ""
-            save_type_mapping_to_file()
+                next_loaded_type_name = ""
+            if not save_type_mapping_to_file(new_mapping):
+                return
+            type_mapping.clear()
+            type_mapping.update(new_mapping)
+            loaded_type_name = next_loaded_type_name
             refresh_setting_table()
             refresh_type_options()
             update_type_icon(loaded_type_name)
@@ -1080,10 +1164,6 @@ def launch_gui(default_excel: Path) -> None:
     type_mapping.update(loaded_mapping)
     if config_warning:
         messagebox.showwarning("配置加载提醒", config_warning)
-    if not type_mapping and default_excel.exists():
-        type_mapping["默认"] = {"excel": str(default_excel), "icon": ""}
-        save_type_mapping_to_file()
-
     refresh_type_options()
     if type_var.get().strip():
         status_var.set(f"当前类型: {type_var.get().strip()}，点击“加载”读取数据。")
@@ -1140,6 +1220,12 @@ def main() -> None:
     # 1) 传了明确查询条件 -> 直接命令行查询
     # 2) 指定 --cli -> 进入命令行交互
     # 3) 默认 -> 打开 GUI
+    if query_conditions is not None or args.cli:
+        try:
+            get_openpyxl_symbols()
+        except (ModuleNotFoundError, ImportError):
+            raise RuntimeError("缺少依赖 openpyxl，请先执行: pip install -r requirements.txt")
+
     if query_conditions is not None:
         headers, records = load_records(excel_path)
         results = query_records(records, query_conditions)
