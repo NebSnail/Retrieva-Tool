@@ -23,7 +23,7 @@ pip install -r requirements.txt
 ### 2.1 图形界面（默认）
 
 ```bash
-python query_tool.py
+python retrieval_tool.py
 ```
 
 说明：
@@ -34,7 +34,7 @@ python query_tool.py
 ### 2.2 命令行交互模式
 
 ```bash
-python query_tool.py --cli
+python retrieval_tool.py --cli
 ```
 
 ### 2.3 命令行直接查询
@@ -42,19 +42,19 @@ python query_tool.py --cli
 按旧参数查询：
 
 ```bash
-python query_tool.py --excel "杠铃汇总.xlsx" --diameter 20 --length 1200
+python retrieval_tool.py --excel "杠铃汇总.xlsx" --diameter 20 --length 1200
 ```
 
 按动态字段查询（可重复传参）：
 
 ```bash
-python query_tool.py --excel "杠铃汇总.xlsx" --field 直径 --value 20 --field 长度 --value 1200
+python retrieval_tool.py --excel "杠铃汇总.xlsx" --field 直径 --value 20 --field 长度 --value 1200
 ```
 
 ### 2.4 运行自检
 
 ```bash
-python query_tool.py --self-check
+python retrieval_tool.py --self-check
 ```
 
 ## 3. GUI 使用方法
@@ -87,7 +87,7 @@ build_exe.bat
 或直接使用 PyInstaller（示例）：
 
 ```bash
-python -m PyInstaller --noconfirm --clean --windowed --name "通用件查询工具" --icon "tool.png" --add-data "tool.png;." --add-data "types_config.json;." "query_tool.py"
+python -m PyInstaller --noconfirm --clean --windowed --name "通用件查询工具" --icon "tool.png" --add-data "tool.png;." --add-data "types_config.json;." "retrieval_tool.py"
 ```
 
 ## 6. 注意事项
@@ -105,7 +105,7 @@ python -m PyInstaller --noconfirm --clean --windowed --name "通用件查询工�
 
 可按下面流程快速完成首次配置：
 
-1. 双击启动程序（或运行 `python query_tool.py`）。
+1. 双击启动程序（或运行 `python retrieval_tool.py`）。
 2. 点击“设置”，输入口令 `2233`。
 3. 点击“新增/更新”，填写：
 4. 名称（例如：杠铃）。

@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['query_tool.py'],
+    ['retrieval_tool.py'],
     pathex=[],
     binaries=[],
     datas=[('tool.png', '.'), ('types_config.json', '.')],

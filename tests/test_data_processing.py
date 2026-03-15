@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from query_tool import (
+from retrieval_tool import (
     build_query_indexes,
     dump_signed_type_mapping,
     get_icon_subsample_scale,

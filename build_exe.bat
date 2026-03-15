@@ -8,7 +8,7 @@ if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 if exist "通用件查询工具.spec" del /q "通用件查询工具.spec"
 
-"%PY%" -m PyInstaller --noconfirm --clean --windowed --name "通用件查询工具" --icon "tool.png" --add-data "tool.png;." --add-data "types_config.json;." "query_tool.py"
+"%PY%" -m PyInstaller --noconfirm --clean --windowed --name "通用件查询工具" --icon "tool.png" --add-data "tool.png;." --add-data "types_config.json;." "retrieval_tool.py"
 
 if %errorlevel% neq 0 (
   echo 打包失败，请检查上方日志。

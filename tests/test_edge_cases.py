@@ -4,7 +4,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-from query_tool import load_records, query_records
+from retrieval_tool import load_records, query_records
 
 
 class TestEdgeCases(unittest.TestCase):

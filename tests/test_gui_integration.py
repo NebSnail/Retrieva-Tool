@@ -3,7 +3,7 @@ from unittest import mock
 
 import tkinter as tk
 
-from query_tool import launch_gui
+from retrieval_tool import launch_gui
 
 
 def _can_start_tk() -> bool:
