@@ -10,9 +10,6 @@ import shutil
 import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
-import tkinter as tk
-import tkinter.font as tkfont
-from tkinter import filedialog, messagebox, simpledialog, ttk
 
 INITIAL_HEADERS = ["序号", "编码", "直径", "长度", "所属项目"]
 REQUIRED_HEADERS = ["编码", "所属项目"]
@@ -26,7 +23,7 @@ QUERY_INPUT_WIDTH = 12
 TYPE_ICON_TARGET_SIZE = 120
 APP_ICON_FILE = "logo.png"
 TYPES_CONFIG_FILE = "types_config.json"
-APP_VERSION = "0.4.260316"
+APP_VERSION = "0.5.260317"
 APP_FOOTER_TEXT = f"Powered by GPT & ZL | v{APP_VERSION}"
 # types_config.json 新格式字段：
 # - _data: 实际类型配置
@@ -500,6 +497,10 @@ def run_interactive(headers: List[str], records: List[Dict[str, str]]) -> None:
 
 
 def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
+    import tkinter as tk
+    import tkinter.font as tkfont
+    from tkinter import filedialog, messagebox, simpledialog, ttk
+
     # GUI 主入口：类型管理、动态查询项、结果展示与复制能力
     root = tk.Tk()
     root.withdraw()
@@ -518,15 +519,37 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
     root.geometry(f"{window_w}x{window_h}+{pos_x}+{pos_y}")
     root.deiconify()
 
-    # 程序标题栏图标：默认读取程序根目录下的 logo.png
-    app_icon_image: Optional[tk.PhotoImage] = None
+    # 程序标题栏图标：优先提供多尺寸（含 256x256），让系统自动选择最合适图标。
+    # 为了提升首屏速度，图标加载放到窗口空闲时执行。
+    app_icon_images: List[Any] = []
     icon_path = get_resource_path(APP_ICON_FILE)
-    if icon_path.exists():
+
+    def apply_window_icon() -> None:
+        nonlocal app_icon_images
+        if not icon_path.exists():
+            return
+
         try:
-            app_icon_image = tk.PhotoImage(file=str(icon_path))
-            root.iconphoto(True, app_icon_image)
-        except tk.TclError:
-            app_icon_image = None
+            from PIL import Image, ImageTk
+
+            with Image.open(icon_path) as icon_source:
+                if icon_source.mode not in ("RGB", "RGBA"):
+                    icon_source = icon_source.convert("RGBA")
+
+                icon_sizes = [16, 32, 48, 64, 128, 256]
+                for size in icon_sizes:
+                    resized = icon_source.resize((size, size), Image.Resampling.LANCZOS)
+                    app_icon_images.append(ImageTk.PhotoImage(resized))
+
+            if app_icon_images:
+                root.iconphoto(True, *app_icon_images)
+        except (ImportError, OSError, ValueError, tk.TclError):
+            try:
+                fallback_icon = tk.PhotoImage(file=str(icon_path))
+                app_icon_images = [fallback_icon]
+                root.iconphoto(True, fallback_icon)
+            except tk.TclError:
+                app_icon_images = []
 
     style = ttk.Style(root)
     default_font = tkfont.nametofont("TkDefaultFont")
@@ -545,8 +568,10 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
     config_path = get_preferred_config_path()
     type_mapping: Dict[str, Dict[str, str]] = {}
     type_var = tk.StringVar()
-    status_var = tk.StringVar(value="请先在“设置”中配置类型。")
+    status_var = tk.StringVar(value="正在初始化配置...")
     type_icon_image: Optional[Any] = None
+    icon_cache: Dict[Tuple[str, int], Any] = {}
+    startup_load_attempted = False
     # loaded_type_name 表示“真正加载成功”的类型。
     # 仅切换下拉框不算加载，避免图标/状态误导用户。
     loaded_type_name = ""
@@ -707,6 +732,16 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         if not path.exists():
             return None
 
+        try:
+            cache_path = str(path.resolve())
+        except (OSError, RuntimeError, ValueError):
+            cache_path = str(path)
+
+        cache_key = (cache_path, target_size)
+        cached_image = icon_cache.get(cache_key)
+        if cached_image is not None:
+            return cached_image
+
         # 优先用 Pillow：缩放质量更好，尺寸控制更精确。
         try:
             from PIL import Image, ImageTk
@@ -716,7 +751,9 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
                     pil_image = pil_image.convert("RGBA")
                 resized = pil_image.copy()
                 resized.thumbnail((target_size, target_size), Image.Resampling.LANCZOS)
-            return ImageTk.PhotoImage(resized)
+            image = ImageTk.PhotoImage(resized)
+            icon_cache[cache_key] = image
+            return image
         except (ImportError, OSError, ValueError):
             pass
 
@@ -731,11 +768,13 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         if max(width, height) > target_size:
             scale = get_icon_subsample_scale(width, height, target_size)
             if scale <= 1:
+                icon_cache[cache_key] = image
                 return image
             try:
                 image = image.subsample(scale, scale)
             except tk.TclError:
                 return None
+        icon_cache[cache_key] = image
         return image
 
     def update_type_icon(name: Optional[str] = None) -> None:
@@ -988,7 +1027,6 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         form_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         form_frame.columnconfigure(1, weight=0)
         form_frame.columnconfigure(3, weight=1)
-        form_frame.columnconfigure(5, weight=1)
 
         setting_name_var = tk.StringVar()
         setting_path_var = tk.StringVar()
@@ -1010,7 +1048,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         ttk.Button(form_frame, text="浏览...", command=browse_setting_excel).grid(row=0, column=4, padx=(8, 0))
 
         ttk.Label(form_frame, text="图标路径:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        ttk.Entry(form_frame, textvariable=setting_icon_var).grid(row=1, column=1, columnspan=5, sticky="ew", pady=(8, 0))
+        ttk.Entry(form_frame, textvariable=setting_icon_var).grid(row=1, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
         def browse_setting_icon() -> None:
             filename = filedialog.askopenfilename(
@@ -1020,7 +1058,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             if filename:
                 setting_icon_var.set(filename)
 
-        ttk.Button(form_frame, text="选择图标", command=browse_setting_icon).grid(row=1, column=6, padx=(8, 0), pady=(8, 0))
+        ttk.Button(form_frame, text="选择图标", command=browse_setting_icon).grid(row=1, column=4, padx=(8, 0), pady=(8, 0))
 
         setting_columns = ("name", "path", "icon")
         setting_table = ttk.Treeview(container, columns=setting_columns, show="headings", height=10)
@@ -1136,9 +1174,52 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             update_type_icon(loaded_type_name)
             status_var.set(f"已删除类型“{name}”")
 
+        def move_setting(direction: int) -> None:
+            selected = setting_table.selection()
+            if not selected:
+                messagebox.showwarning("未选择记录", "请先选择要移动的类型。", parent=settings_window)
+                return
+
+            selected_name = str(setting_table.item(selected[0], "values")[0]).strip()
+            ordered_names = list(type_mapping.keys())
+            try:
+                current_index = ordered_names.index(selected_name)
+            except ValueError:
+                return
+
+            target_index = current_index + direction
+            if target_index < 0 or target_index >= len(ordered_names):
+                return
+
+            ordered_names[current_index], ordered_names[target_index] = (
+                ordered_names[target_index],
+                ordered_names[current_index],
+            )
+
+            reordered_mapping = {
+                name: {
+                    "excel": type_mapping.get(name, {}).get("excel", ""),
+                    "icon": type_mapping.get(name, {}).get("icon", ""),
+                }
+                for name in ordered_names
+            }
+
+            if not save_type_mapping_to_file(reordered_mapping):
+                return
+
+            type_mapping.clear()
+            type_mapping.update(reordered_mapping)
+            refresh_setting_table(select_name=selected_name)
+            refresh_type_options(selected_name)
+            update_type_icon(loaded_type_name)
+            move_action = "上移" if direction < 0 else "下移"
+            status_var.set(f"已{move_action}类型“{selected_name}”")
+
         ttk.Button(action_frame, text="新增/更新", command=save_setting).grid(row=0, column=0)
         ttk.Button(action_frame, text="删除", command=delete_setting).grid(row=0, column=1, padx=(8, 0))
-        ttk.Button(action_frame, text="关闭", command=settings_window.destroy).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(action_frame, text="上移", command=lambda: move_setting(-1)).grid(row=0, column=2, padx=(8, 0))
+        ttk.Button(action_frame, text="下移", command=lambda: move_setting(1)).grid(row=0, column=3, padx=(8, 0))
+        ttk.Button(action_frame, text="关闭", command=settings_window.destroy).grid(row=0, column=4, padx=(8, 0))
 
         setting_table.bind("<<TreeviewSelect>>", on_setting_row_select)
         refresh_setting_table()
@@ -1184,18 +1265,29 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
 
     root.bind("<Return>", lambda _event: run_query())
 
-    loaded_mapping, config_warning = load_type_mapping_from_file()
-    type_mapping.update(loaded_mapping)
-    if config_warning:
-        messagebox.showwarning("配置加载提醒", config_warning)
-    refresh_type_options()
-    if type_var.get().strip():
-        status_var.set(f"当前类型: {type_var.get().strip()}，点击“加载”读取数据。")
-    else:
-        status_var.set("暂无类型，请点击“设置”新增。")
+    def initialize_type_mapping() -> None:
+        loaded_mapping, config_warning = load_type_mapping_from_file()
+        type_mapping.update(loaded_mapping)
+        if config_warning:
+            messagebox.showwarning("配置加载提醒", config_warning)
+        refresh_type_options()
+
+        # 若启动时尝试过命令行参数加载（无论成功或失败），
+        # 保留 load_data_from_path 给出的状态提示，不被异步初始化覆盖。
+        if startup_load_attempted or records:
+            return
+
+        if type_var.get().strip():
+            status_var.set(f"当前类型: {type_var.get().strip()}，点击“加载”读取数据。")
+        else:
+            status_var.set("暂无类型，请点击“设置”新增。")
 
     if prefer_default_excel:
+        startup_load_attempted = True
         load_data_from_path(default_excel, "命令行参数")
+
+    root.after_idle(apply_window_icon)
+    root.after_idle(initialize_type_mapping)
 
     root.mainloop()
 
