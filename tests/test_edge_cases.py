@@ -12,7 +12,7 @@ from retrieval_tool import load_records, query_records
 
 class TestEdgeCases(unittest.TestCase):
     def test_query_records_empty_conditions(self):
-        records = [{"编码": "A"}]
+        records = [{"/A": "A"}]
         self.assertEqual(query_records(records, {}), [])
 
     @unittest.skipIf(Workbook is None, "openpyxl is not installed")
@@ -21,7 +21,7 @@ class TestEdgeCases(unittest.TestCase):
             excel_path = Path(tmp_dir) / "missing_required.xlsx"
             wb = Workbook()
             ws = wb.active
-            ws.append(["序号", "编码", "直径", "长度", "项目"])
+            ws.append(["序号", "/A", "直径", "长度", "项目"])
             wb.save(excel_path)
             wb.close()
 
@@ -35,7 +35,7 @@ class TestEdgeCases(unittest.TestCase):
             excel_path = Path(tmp_dir) / "header_gap.xlsx"
             wb = Workbook()
             ws = wb.active
-            ws.append(["序号", "编码", "", "长度", "所属项目"])
+            ws.append(["序号", "/A", "", "长度", "/B"])
             wb.save(excel_path)
             wb.close()
 

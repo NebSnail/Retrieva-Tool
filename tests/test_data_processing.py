@@ -29,7 +29,7 @@ from retrieval_tool import (
 
 class TestDataProcessing(unittest.TestCase):
     def test_get_query_headers(self):
-        headers = ["序号", "编码", "直径", "长度", "所属项目"]
+        headers = ["序号", "/A", "直径", "长度", "/B"]
         self.assertEqual(get_query_headers(headers), ["直径", "长度"])
 
     def test_normalize_value_decimal_and_leading_zero(self):
@@ -39,15 +39,15 @@ class TestDataProcessing(unittest.TestCase):
 
     def test_query_with_index_candidates(self):
         records = [
-            {"直径": "20", "长度": "1200", "编码": "A"},
-            {"直径": "20", "长度": "1500", "编码": "B"},
-            {"直径": "22", "长度": "1200", "编码": "C"},
+            {"直径": "20", "长度": "1200", "/A": "A"},
+            {"直径": "20", "长度": "1500", "/A": "B"},
+            {"直径": "22", "长度": "1200", "/A": "C"},
         ]
         indexes = build_query_indexes(records, ["直径", "长度"])
         candidates = get_candidate_indexes(indexes, {"直径": "20", "长度": "1200"})
         results = query_records(records, {"直径": "20", "长度": "1200"}, candidate_indexes=candidates)
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["编码"], "A")
+        self.assertEqual(results[0]["/A"], "A")
 
     def test_get_icon_subsample_scale_boundary(self):
         self.assertEqual(get_icon_subsample_scale(120, 120, 120), 1)
@@ -61,7 +61,7 @@ class TestDataProcessing(unittest.TestCase):
             excel_path = Path(tmp_dir) / "sample.xlsx"
             wb = Workbook()
             ws = wb.active
-            ws.append(["序号", "编码", "直径", "长度", "所属项目"])
+            ws.append(["序号", "/A", "直径", "长度", "/B"])
             ws.cell(row=2, column=1, value=1)
             code_cell = ws.cell(row=2, column=2, value=37332314020)
             code_cell.number_format = "000000000000"
@@ -72,8 +72,8 @@ class TestDataProcessing(unittest.TestCase):
             wb.close()
 
             headers, records = load_records(excel_path)
-            self.assertEqual(headers, ["序号", "编码", "直径", "长度", "所属项目"])
-            self.assertEqual(records[0]["编码"], "037332314020")
+            self.assertEqual(headers, ["序号", "/A", "直径", "长度", "/B"])
+            self.assertEqual(records[0]["/A"], "037332314020")
 
     def test_config_loader_compat_and_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
