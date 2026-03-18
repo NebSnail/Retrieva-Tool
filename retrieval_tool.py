@@ -827,7 +827,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
     footer_info = ttk.Label(status_frame, text=APP_FOOTER_TEXT, anchor="e")
     footer_info.grid(row=0, column=1, sticky="e")
 
-    settings_button = ttk.Label(status_frame, text="", cursor="hand2")
+    settings_button = ttk.Label(status_frame, text="设置", cursor="hand2")
     settings_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
     settings_button.bind("<Button-1>", lambda _event: open_settings_window())
 

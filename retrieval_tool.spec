@@ -5,7 +5,7 @@ a = Analysis(
     ['retrieval_tool.py'],
     pathex=[],
     binaries=[],
-    datas=[('logo.png', '.'), ('types_config.json', '.')],
+    datas=[('logo.png', '.'), ('options.png', '.'), ('types_config.json', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
