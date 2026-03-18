@@ -9,11 +9,17 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 KEY_COLUMN_A = "/A"
 KEY_COLUMN_B = "/B"
-HIDDEN_RESULT_HEADERS = {KEY_COLUMN_A, KEY_COLUMN_B}
+KEY_COLUMN_C = "/C"
+KEY_COLUMN_D = "/D"
+KEY_COLUMN_E = "/E"
+KEY_COLUMN_F = "/F"
+ALL_KEY_COLUMNS = {KEY_COLUMN_A, KEY_COLUMN_B, KEY_COLUMN_C, KEY_COLUMN_D, KEY_COLUMN_E, KEY_COLUMN_F}
+FUZZY_KEY_PAIRS = ((KEY_COLUMN_C, KEY_COLUMN_D), (KEY_COLUMN_E, KEY_COLUMN_F))
+HIDDEN_RESULT_HEADERS = set(ALL_KEY_COLUMNS)
 INITIAL_HEADERS = ["序号", KEY_COLUMN_A, "直径", "长度", KEY_COLUMN_B]
 SETTINGS_PASSCODE = "2233"
 MAIN_WINDOW_SIZE = "900x560"
@@ -23,15 +29,36 @@ SETTINGS_WINDOW_HEIGHT = 420
 TABLE_COLUMN_WIDTH = 120
 QUERY_INPUT_WIDTH = 12
 TYPE_ICON_TARGET_SIZE = 240
+DEFERRED_STARTUP_ICON_DELAY_MS = 120
+AUTO_FIT_SAMPLE_LIMIT = 200
 APP_ICON_FILE = "logo.png"
+OPTIONS_ICON_FILE = "options.png"
 TYPES_CONFIG_FILE = "types_config.json"
-APP_VERSION = "0.6.260318"
+UI_CONFIG_FILE = "ui_config.json"
+DEFAULT_MAIN_TITLE = "标题"
+APP_VERSION = "0.7.260319"
 APP_FOOTER_TEXT = f"Powered by GPT & ZL | v{APP_VERSION}"
 # types_config.json 新格式字段：
 # - _data: 实际类型配置
 # - _signature: 用口令计算出的签名，用于检测文件是否被手动改动
 CONFIG_DATA_FIELD = "_data"
 CONFIG_SIGNATURE_FIELD = "_signature"
+
+
+def save_settings_atomically(
+    save_title_func: Callable[[], bool],
+    save_mapping_func: Callable[[], bool],
+    rollback_title_func: Callable[[], bool],
+) -> bool:
+    """Save settings all-or-nothing: title first, mapping second, title rollback on failure."""
+    if not save_title_func():
+        return False
+
+    if save_mapping_func():
+        return True
+
+    rollback_title_func()
+    return False
 
 
 def get_openpyxl_symbols():
@@ -137,7 +164,7 @@ def get_query_headers(headers: List[str]) -> List[str]:
     if key_a_idx >= key_b_idx:
         return []
 
-    return headers[key_a_idx + 1 : key_b_idx]
+    return [header for header in headers[key_a_idx + 1 : key_b_idx] if header not in ALL_KEY_COLUMNS]
 
 
 def resolve_key_columns(headers: List[str]) -> Optional[Tuple[str, str]]:
@@ -145,6 +172,51 @@ def resolve_key_columns(headers: List[str]) -> Optional[Tuple[str, str]]:
     if KEY_COLUMN_A in headers and KEY_COLUMN_B in headers:
         return KEY_COLUMN_A, KEY_COLUMN_B
     return None
+
+
+def get_fuzzy_query_fields(headers: List[str]) -> Set[str]:
+    """Return fields that should use fuzzy (contains) matching."""
+    key_columns = resolve_key_columns(headers)
+    if key_columns is None:
+        return set()
+
+    key_a, key_b = key_columns
+    key_a_idx = headers.index(key_a)
+    key_b_idx = headers.index(key_b)
+    fuzzy_fields: Set[str] = set()
+    present_ranges: List[Tuple[str, str, int, int]] = []
+
+    for start_key, end_key in FUZZY_KEY_PAIRS:
+        has_start = start_key in headers
+        has_end = end_key in headers
+        if has_start != has_end:
+            raise ValueError(f"标题行关键列不完整：{start_key} 与 {end_key} 必须成对出现。")
+        if not has_start:
+            continue
+
+        start_idx = headers.index(start_key)
+        end_idx = headers.index(end_key)
+        if start_idx >= end_idx:
+            raise ValueError(f"标题顺序错误：必须先有“{start_key}”，后有“{end_key}”。")
+        if not (key_a_idx < start_idx < end_idx < key_b_idx):
+            raise ValueError(
+                f"标题位置错误：{start_key} 与 {end_key} 必须位于“{KEY_COLUMN_A}”和“{KEY_COLUMN_B}”之间。"
+            )
+
+        present_ranges.append((start_key, end_key, start_idx, end_idx))
+
+        fuzzy_fields.update(header for header in headers[start_idx + 1 : end_idx] if header not in ALL_KEY_COLUMNS)
+
+    if len(present_ranges) >= 2:
+        _, _, start1, end1 = present_ranges[0]
+        _, _, start2, end2 = present_ranges[1]
+        is_cross = (start1 < start2 < end1 < end2) or (start2 < start1 < end2 < end1)
+        if is_cross:
+            raise ValueError(
+                f"标题格式错误：{KEY_COLUMN_C}/{KEY_COLUMN_D} 与 {KEY_COLUMN_E}/{KEY_COLUMN_F} 不能交叉。"
+            )
+
+    return fuzzy_fields
 
 
 def get_display_headers(headers: List[str]) -> List[str]:
@@ -352,6 +424,9 @@ def load_records(excel_path: Path) -> Tuple[List[str], List[Dict[str, str]]]:
         if actual_headers.index(key_a) >= actual_headers.index(key_b):
             raise ValueError(f"标题顺序错误：必须先有“{key_a}”，后有“{key_b}”。")
 
+        # 校验 /C-/D、/E-/F 模糊区间关键列的合法性。
+        get_fuzzy_query_fields(actual_headers)
+
         # 把每一行转成 {标题: 值} 的字典，后续查询统一按字典处理。
         records: List[Dict[str, str]] = []
         for row in worksheet.iter_rows(min_row=2, min_col=1, max_col=len(actual_headers), values_only=False):
@@ -372,6 +447,8 @@ def query_records(
     records: List[Dict[str, str]],
     conditions: Dict[str, str],
     candidate_indexes: Optional[List[int]] = None,
+    fuzzy_fields: Optional[Set[str]] = None,
+    normalized_rows: Optional[List[Dict[str, str]]] = None,
 ) -> List[Dict[str, str]]:
     # 仅保留有效查询条件，空输入不参与过滤
     normalized_conditions: Dict[str, str] = {}
@@ -383,20 +460,51 @@ def query_records(
     if not normalized_conditions:
         return []
 
+    normalized_cache_ready = normalized_rows is not None and len(normalized_rows) == len(records)
     if candidate_indexes is None:
-        candidate_rows = records
+        if normalized_cache_ready:
+            candidate_pairs = zip(records, normalized_rows)
+        else:
+            candidate_pairs = ((row, None) for row in records)
     else:
         record_count = len(records)
-        candidate_rows = (records[idx] for idx in candidate_indexes if 0 <= idx < record_count)
+        if normalized_cache_ready:
+            candidate_pairs = (
+                (records[idx], normalized_rows[idx])
+                for idx in candidate_indexes
+                if 0 <= idx < record_count
+            )
+        else:
+            candidate_pairs = ((records[idx], None) for idx in candidate_indexes if 0 <= idx < record_count)
 
-    def matches(row: Dict[str, str]) -> bool:
+    fuzzy_match_fields = fuzzy_fields or set()
+
+    def matches(row: Dict[str, str], normalized_row: Optional[Dict[str, str]]) -> bool:
         # 多条件“且”匹配：任一条件不满足即排除
         for key, value in normalized_conditions.items():
-            if normalize_match_key(row.get(key, "")) != value:
+            if normalized_row is not None and key in normalized_row:
+                row_value = normalized_row.get(key, "")
+            else:
+                row_value = normalize_match_key(row.get(key, ""))
+            if key in fuzzy_match_fields:
+                if value not in row_value:
+                    return False
+            elif row_value != value:
                 return False
         return True
 
-    return [row for row in candidate_rows if matches(row)]
+    return [row for row, normalized_row in candidate_pairs if matches(row, normalized_row)]
+
+
+def build_normalized_query_rows(records: List[Dict[str, str]], fields: List[str]) -> List[Dict[str, str]]:
+    """Build normalized values cache for query fields to speed up repeated filtering."""
+    if not records or not fields:
+        return [{} for _ in records]
+
+    normalized_rows: List[Dict[str, str]] = []
+    for row in records:
+        normalized_rows.append({field: normalize_match_key(row.get(field, "")) for field in fields})
+    return normalized_rows
 
 
 def build_query_indexes(records: List[Dict[str, str]], fields: List[str]) -> Dict[str, Dict[str, List[int]]]:
@@ -511,6 +619,7 @@ def run_interactive(headers: List[str], records: List[Dict[str, str]]) -> None:
     print("已加载数据，可开始查询。输入 q 退出。")
 
     query_headers = get_query_headers(headers)
+    fuzzy_fields = get_fuzzy_query_fields(headers)
     if not query_headers:
         print(f"当前表格在“{KEY_COLUMN_A}”和“{KEY_COLUMN_B}”之间没有可查询字段。")
         return
@@ -529,7 +638,7 @@ def run_interactive(headers: List[str], records: List[Dict[str, str]]) -> None:
             print("-" * 50)
             continue
 
-        results = query_records(records, conditions)
+        results = query_records(records, conditions, fuzzy_fields=fuzzy_fields)
         print_results(headers, results)
         print("-" * 50)
 
@@ -561,6 +670,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
     # 为了提升首屏速度，图标加载放到窗口空闲时执行。
     app_icon_images: List[Any] = []
     icon_path = get_resource_path(APP_ICON_FILE)
+    options_icon_path = get_resource_path(OPTIONS_ICON_FILE)
 
     def apply_window_icon() -> None:
         nonlocal app_icon_images
@@ -591,6 +701,13 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
 
     style = ttk.Style(root)
     default_font = tkfont.nametofont("TkDefaultFont")
+    table_measure_font = tkfont.nametofont("TkDefaultFont")
+    title_font = tkfont.Font(
+        root=root,
+        family="华文隶书",
+        size=max(int(default_font.cget("size")) * 3, 1),
+        weight="bold",
+    )
     query_font = tkfont.Font(root=root, family=default_font.cget("family"), size=default_font.cget("size"), weight="bold")
     style.configure("Query.TButton", font=query_font, foreground="#000000")
 
@@ -598,18 +715,24 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
     # query_indexes: 为查询字段建立的倒排索引（加速查询）
     records: List[Dict[str, str]] = []
     query_indexes: Dict[str, Dict[str, List[int]]] = {}
+    normalized_query_rows: List[Dict[str, str]] = []
     current_headers: List[str] = []
     sort_descending: Dict[str, bool] = {}
     current_sort_column: Optional[str] = None
     current_sort_is_desc: bool = False
     query_vars: Dict[str, tk.StringVar] = {}
+    fuzzy_query_fields: Set[str] = set()
     config_path: Optional[Path] = None
     type_mapping: Dict[str, Dict[str, str]] = {}
     type_var = tk.StringVar()
+    app_title_var = tk.StringVar(value=DEFAULT_MAIN_TITLE)
     status_var = tk.StringVar(value="正在初始化配置...")
     type_icon_image: Optional[Any] = None
     icon_cache: Dict[Tuple[str, int], Any] = {}
     pending_icon_update_id: Optional[str] = None
+    pending_full_autofit_id: Optional[str] = None
+    render_generation = 0
+    settings_button_icon_image: Optional[Any] = None
     startup_load_attempted = False
     # loaded_type_name 表示“真正加载成功”的类型。
     # 仅切换下拉框不算加载，避免图标/状态误导用户。
@@ -631,9 +754,20 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         bd=0,
         background=root.cget("bg"),
     )
-    type_icon_canvas.grid(row=0, column=0, columnspan=4, pady=(0, 6))
-    ttk.Label(top_frame, text="类型:").grid(row=1, column=0, sticky="w", padx=(0, 8))
-    type_combo = ttk.Combobox(top_frame, textvariable=type_var, state="readonly")
+    type_icon_canvas.grid(row=0, column=0, sticky="nw", padx=(18, 28), pady=(0, 0))
+
+    type_control_frame = ttk.Frame(top_frame)
+    type_control_frame.grid(row=0, column=1, sticky="ew", pady=(10, 0))
+    type_control_frame.columnconfigure(1, weight=1)
+    ttk.Label(type_control_frame, textvariable=app_title_var, font=title_font, anchor="center").grid(
+        row=0,
+        column=0,
+        columnspan=3,
+        sticky="ew",
+        pady=(0, 12),
+    )
+    ttk.Label(type_control_frame, text="类型:").grid(row=1, column=0, sticky="w", padx=(0, 8))
+    type_combo = ttk.Combobox(type_control_frame, textvariable=type_var, state="readonly", width=56)
     type_combo.grid(row=1, column=1, sticky="ew")
 
     query_frame = ttk.Frame(root, padding=(10, 0, 10, 10))
@@ -692,6 +826,10 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
 
     footer_info = ttk.Label(status_frame, text=APP_FOOTER_TEXT, anchor="e")
     footer_info.grid(row=0, column=1, sticky="e")
+
+    settings_button = ttk.Label(status_frame, text="", cursor="hand2")
+    settings_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+    settings_button.bind("<Button-1>", lambda _event: open_settings_window())
 
     context_menu = tk.Menu(root, tearoff=0)
 
@@ -766,6 +904,36 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         if config_path is None:
             config_path = get_preferred_config_path()
         return load_type_mapping_with_status(config_path)
+
+    def get_ui_config_path() -> Path:
+        nonlocal config_path
+        if config_path is None:
+            config_path = get_preferred_config_path()
+        return config_path.with_name(UI_CONFIG_FILE)
+
+    def load_app_title_from_file() -> str:
+        ui_config_path = get_ui_config_path()
+        if not ui_config_path.exists():
+            return DEFAULT_MAIN_TITLE
+
+        try:
+            payload = json.loads(ui_config_path.read_text(encoding="utf-8"))
+            if isinstance(payload, dict):
+                title = str(payload.get("title", DEFAULT_MAIN_TITLE)).strip()
+                return title or DEFAULT_MAIN_TITLE
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
+        return DEFAULT_MAIN_TITLE
+
+    def save_app_title_to_file(title_text: str) -> bool:
+        ui_config_path = get_ui_config_path()
+        payload = {"title": title_text}
+        try:
+            ui_config_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except OSError as exc:
+            messagebox.showerror("保存失败", f"标题保存失败: {exc}")
+            return False
 
     def save_type_mapping_to_file(mapping_to_save: Dict[str, Dict[str, str]]) -> bool:
         nonlocal config_path
@@ -855,6 +1023,52 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         icon_cache[cache_key] = image
         return image
 
+    def apply_settings_button_icon() -> None:
+        nonlocal settings_button_icon_image
+        if not options_icon_path.exists():
+            return
+
+        footer_height = max(footer_info.winfo_reqheight(), footer_info.winfo_height(), 1)
+        target_height = max(int(round(footer_height * 0.6)), 1)
+
+        try:
+            from PIL import Image, ImageTk
+
+            with Image.open(options_icon_path) as pil_image:
+                if pil_image.mode not in ("RGB", "RGBA"):
+                    pil_image = pil_image.convert("RGBA")
+
+                width, height = pil_image.size
+                if width <= 0 or height <= 0:
+                    return
+
+                resized_height = max(target_height, 1)
+                resized_width = max(1, int(round(width * (resized_height / height))))
+                resized = pil_image.resize((resized_width, resized_height), Image.Resampling.LANCZOS)
+
+            settings_button_icon_image = ImageTk.PhotoImage(resized)
+            settings_button.configure(text="", image=settings_button_icon_image, compound="center")
+            return
+        except (ImportError, OSError, ValueError, tk.TclError):
+            pass
+
+        try:
+            image = tk.PhotoImage(file=str(options_icon_path))
+            width = image.width()
+            height = image.height()
+            if width <= 0 or height <= 0:
+                return
+
+            if height > target_height:
+                scale = get_icon_subsample_scale(width, height, target_height)
+                if scale > 1:
+                    image = image.subsample(scale, scale)
+
+            settings_button_icon_image = image
+            settings_button.configure(text="", image=settings_button_icon_image, compound="center")
+        except tk.TclError:
+            return
+
     def update_type_icon(name: Optional[str] = None) -> None:
         nonlocal type_icon_image
         # 默认按“已加载类型”显示图标，而不是当前下拉框选中值。
@@ -871,7 +1085,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         type_icon_image = image
         type_icon_canvas.create_image(TYPE_ICON_TARGET_SIZE // 2, TYPE_ICON_TARGET_SIZE // 2, image=type_icon_image)
 
-    def schedule_type_icon_update(name: Optional[str] = None) -> None:
+    def schedule_type_icon_update(name: Optional[str] = None, delay_ms: int = 0) -> None:
         nonlocal pending_icon_update_id
 
         if pending_icon_update_id is not None:
@@ -885,9 +1099,12 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             pending_icon_update_id = None
             update_type_icon(name)
 
-        pending_icon_update_id = root.after_idle(run_icon_update)
+        if delay_ms > 0:
+            pending_icon_update_id = root.after(delay_ms, run_icon_update)
+        else:
+            pending_icon_update_id = root.after_idle(run_icon_update)
 
-    def refresh_type_options(preferred_name: Optional[str] = None) -> None:
+    def refresh_type_options(preferred_name: Optional[str] = None, delay_icon_ms: int = 0) -> None:
         nonlocal loaded_type_name
         names = list(type_mapping.keys())
         type_combo["values"] = names
@@ -906,7 +1123,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         if loaded_type_name and loaded_type_name not in type_mapping:
             loaded_type_name = ""
 
-        schedule_type_icon_update(loaded_type_name)
+        schedule_type_icon_update(loaded_type_name, delay_ms=delay_icon_ms)
 
     def update_table_headers(headers: List[str]) -> None:
         nonlocal current_headers, current_sort_column, current_sort_is_desc
@@ -919,35 +1136,68 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             table.column(col, width=TABLE_COLUMN_WIDTH, minwidth=40, anchor="center")
         refresh_sort_headings()
 
-    def auto_fit_table_columns(rows: List[Dict[str, str]]) -> None:
+    def auto_fit_table_columns(
+        rows: List[Dict[str, str]],
+        sample_limit: Optional[int] = None,
+        only_expand: bool = False,
+    ) -> None:
         if not current_headers:
             return
 
-        measure_font = tkfont.nametofont("TkDefaultFont")
+        rows_to_measure = rows
+        if sample_limit is not None and len(rows) > sample_limit:
+            rows_to_measure = rows[:sample_limit]
+
         horizontal_padding = 28
         for col in current_headers:
-            max_pixel_width = measure_font.measure(str(col))
-            for row in rows:
+            max_pixel_width = table_measure_font.measure(str(col))
+            for row in rows_to_measure:
                 cell_text = str(row.get(col, ""))
-                max_pixel_width = max(max_pixel_width, measure_font.measure(cell_text))
+                max_pixel_width = max(max_pixel_width, table_measure_font.measure(cell_text))
 
-            table.column(col, width=max(max_pixel_width + horizontal_padding, 40))
+            target_width = max(max_pixel_width + horizontal_padding, 40)
+            if only_expand:
+                current_width = int(table.column(col, "width"))
+                table.column(col, width=max(target_width, current_width))
+            else:
+                table.column(col, width=target_width)
 
     def clear_table() -> None:
         for item_id in table.get_children():
             table.delete(item_id)
 
     def render_rows(rows: List[Dict[str, str]]) -> None:
-        nonlocal current_sort_column, current_sort_is_desc
+        nonlocal current_sort_column, current_sort_is_desc, pending_full_autofit_id, render_generation
         # New result sets should start unsorted to avoid stale sort indicators.
         current_sort_column = None
         current_sort_is_desc = False
         sort_descending.clear()
         refresh_sort_headings()
+        render_generation += 1
+
+        if pending_full_autofit_id is not None:
+            try:
+                root.after_cancel(pending_full_autofit_id)
+            except tk.TclError:
+                pass
+            pending_full_autofit_id = None
+
         clear_table()
         for row in rows:
             table.insert("", "end", values=tuple(row.get(col, "") for col in current_headers))
-        auto_fit_table_columns(rows)
+        auto_fit_table_columns(rows, sample_limit=AUTO_FIT_SAMPLE_LIMIT)
+
+        if len(rows) > AUTO_FIT_SAMPLE_LIMIT:
+            generation_snapshot = render_generation
+
+            def run_full_autofit() -> None:
+                nonlocal pending_full_autofit_id
+                pending_full_autofit_id = None
+                if generation_snapshot != render_generation:
+                    return
+                auto_fit_table_columns(rows, only_expand=True)
+
+            pending_full_autofit_id = root.after_idle(run_full_autofit)
 
     def get_selected_row_values() -> Optional[List[str]]:
         selected = table.selection()
@@ -1025,7 +1275,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
 
     def load_data() -> bool:
         # 加载后同步刷新：表头、输入项、结果区
-        nonlocal records, query_indexes, loaded_type_name
+        nonlocal records, query_indexes, loaded_type_name, fuzzy_query_fields, normalized_query_rows
         path = get_selected_excel_path()
         if path is None:
             return False
@@ -1035,8 +1285,12 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             headers, records = load_records(path)
             update_table_headers(headers)
             rebuild_query_inputs(headers)
+            fuzzy_query_fields = get_fuzzy_query_fields(headers)
             # 只为“可查询字段”建立索引，避免无用内存开销。
-            query_indexes = build_query_indexes(records, get_query_headers(headers))
+            query_headers = get_query_headers(headers)
+            exact_query_headers = [header for header in query_headers if header not in fuzzy_query_fields]
+            query_indexes = build_query_indexes(records, exact_query_headers)
+            normalized_query_rows = build_normalized_query_rows(records, query_headers)
             render_rows(records)
             loaded_type_name = selected_type
             update_type_icon(loaded_type_name)
@@ -1044,23 +1298,31 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             return True
         except (FileNotFoundError, PermissionError, ValueError, OSError) as exc:
             records = []
+            fuzzy_query_fields = set()
+            normalized_query_rows = []
             status_var.set("加载失败，请检查设置与文件。")
             messagebox.showerror("加载失败", str(exc))
             return False
         except (ModuleNotFoundError, ImportError):
             records = []
+            fuzzy_query_fields = set()
+            normalized_query_rows = []
             status_var.set("加载失败：缺少 openpyxl 依赖。")
             messagebox.showerror("缺少依赖", "未安装 openpyxl，请先安装后再加载。")
             return False
 
     def load_data_from_path(path: Path, source_label: str) -> bool:
         # 允许通过命令行参数直接指定 Excel，并在 GUI 启动后自动加载。
-        nonlocal records, query_indexes, loaded_type_name
+        nonlocal records, query_indexes, loaded_type_name, fuzzy_query_fields, normalized_query_rows
         try:
             headers, records = load_records(path)
             update_table_headers(headers)
             rebuild_query_inputs(headers)
-            query_indexes = build_query_indexes(records, get_query_headers(headers))
+            fuzzy_query_fields = get_fuzzy_query_fields(headers)
+            query_headers = get_query_headers(headers)
+            exact_query_headers = [header for header in query_headers if header not in fuzzy_query_fields]
+            query_indexes = build_query_indexes(records, exact_query_headers)
+            normalized_query_rows = build_normalized_query_rows(records, query_headers)
             render_rows(records)
             loaded_type_name = ""
             update_type_icon(loaded_type_name)
@@ -1068,20 +1330,26 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             return True
         except (FileNotFoundError, PermissionError, ValueError, OSError) as exc:
             records = []
+            fuzzy_query_fields = set()
+            normalized_query_rows = []
             status_var.set("加载失败，请检查设置与文件。")
             messagebox.showerror("加载失败", str(exc))
             return False
         except (ModuleNotFoundError, ImportError):
             records = []
+            fuzzy_query_fields = set()
+            normalized_query_rows = []
             status_var.set("加载失败：缺少 openpyxl 依赖。")
             messagebox.showerror("缺少依赖", "未安装 openpyxl，请先安装后再加载。")
             return False
 
     def on_type_selected(_event: tk.Event) -> None:
-        nonlocal records, query_indexes
+        nonlocal records, query_indexes, fuzzy_query_fields, normalized_query_rows
         # 切换类型时清空旧结果，防止用户误把旧数据当成新类型数据。
         records = []
         query_indexes = {}
+        fuzzy_query_fields = set()
+        normalized_query_rows = []
         clear_table()
         for value_var in query_vars.values():
             value_var.set("")
@@ -1109,6 +1377,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         settings_width = SETTINGS_WINDOW_WIDTH
         settings_height = SETTINGS_WINDOW_HEIGHT
         settings_window.geometry(f"{settings_width}x{settings_height}")
+        settings_window.minsize(720, 420)
         settings_window.transient(root)
         settings_window.grab_set()
         settings_window.update_idletasks()
@@ -1130,21 +1399,47 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         container = ttk.Frame(settings_window, padding=10)
         container.grid(row=0, column=0, sticky="nsew")
         container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=0)
         container.rowconfigure(1, weight=1)
 
-        form_frame = ttk.Frame(container)
+        form_frame = ttk.LabelFrame(container, text="编辑区", padding=(10, 8))
         form_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         form_frame.columnconfigure(1, weight=0)
-        form_frame.columnconfigure(3, weight=1)
+        form_frame.columnconfigure(3, weight=2)
 
         setting_name_var = tk.StringVar()
         setting_path_var = tk.StringVar()
         setting_icon_var = tk.StringVar()
+        setting_title_var = tk.StringVar(value=app_title_var.get())
+        draft_type_mapping = {
+            key: {"excel": value.get("excel", ""), "icon": value.get("icon", "")}
+            for key, value in type_mapping.items()
+        }
+        pending_loaded_type_name = loaded_type_name
+        has_unsaved_changes = False
 
-        ttk.Label(form_frame, text="名称:").grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ttk.Entry(form_frame, textvariable=setting_name_var, width=18).grid(row=0, column=1, sticky="w")
-        ttk.Label(form_frame, text="Excel 文件:").grid(row=0, column=2, sticky="w", padx=(14, 8))
-        ttk.Entry(form_frame, textvariable=setting_path_var).grid(row=0, column=3, sticky="ew")
+        def mark_settings_dirty(changed: bool = True) -> None:
+            nonlocal has_unsaved_changes
+            has_unsaved_changes = changed
+
+        original_title_text = app_title_var.get()
+
+        def on_title_changed(*_args) -> None:
+            title_now = setting_title_var.get().strip() or DEFAULT_MAIN_TITLE
+            mapping_changed = draft_type_mapping != type_mapping
+            mark_settings_dirty(mapping_changed or title_now != original_title_text)
+
+        setting_title_var.trace_add("write", on_title_changed)
+
+        ttk.Label(form_frame, text="标题:").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        ttk.Entry(form_frame, textvariable=setting_title_var).grid(row=0, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+
+        ttk.Label(form_frame, text="保存后生效").grid(row=0, column=4, padx=(8, 0), sticky="w", pady=(8, 0))
+
+        ttk.Label(form_frame, text="名称:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        ttk.Entry(form_frame, textvariable=setting_name_var, width=18).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(form_frame, text="Excel 文件:").grid(row=1, column=2, sticky="w", padx=(4, 8), pady=(8, 0))
+        ttk.Entry(form_frame, textvariable=setting_path_var).grid(row=1, column=3, sticky="ew", pady=(8, 0))
 
         def browse_setting_excel() -> None:
             filename = filedialog.askopenfilename(
@@ -1154,10 +1449,10 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             if filename:
                 setting_path_var.set(filename)
 
-        ttk.Button(form_frame, text="浏览...", command=browse_setting_excel).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(form_frame, text="浏览...", command=browse_setting_excel).grid(row=1, column=4, padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(form_frame, text="图标路径:").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
-        ttk.Entry(form_frame, textvariable=setting_icon_var).grid(row=1, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Label(form_frame, text="图标路径:").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(8, 0))
+        ttk.Entry(form_frame, textvariable=setting_icon_var).grid(row=2, column=1, columnspan=3, sticky="ew", pady=(8, 0))
 
         def browse_setting_icon() -> None:
             filename = filedialog.askopenfilename(
@@ -1167,30 +1462,39 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             if filename:
                 setting_icon_var.set(filename)
 
-        ttk.Button(form_frame, text="选择图标", command=browse_setting_icon).grid(row=1, column=4, padx=(8, 0), pady=(8, 0))
+        ttk.Button(form_frame, text="选择图标", command=browse_setting_icon).grid(row=2, column=4, padx=(8, 0), pady=(8, 0))
+
+        setting_table_frame = ttk.LabelFrame(container, text="类型列表", padding=(0, 6, 0, 0))
+        setting_table_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        setting_table_frame.rowconfigure(0, weight=1)
+        setting_table_frame.columnconfigure(0, weight=1)
 
         setting_columns = ("name", "path", "icon")
-        setting_table = ttk.Treeview(container, columns=setting_columns, show="headings", height=10)
+        setting_table = ttk.Treeview(setting_table_frame, columns=setting_columns, show="headings", height=10)
         setting_table.heading("name", text="名称")
         setting_table.heading("path", text="Excel 文件路径")
         setting_table.heading("icon", text="图标路径")
         setting_table.column("name", width=170, anchor="center")
         setting_table.column("path", width=320, anchor="w")
         setting_table.column("icon", width=220, anchor="w")
-        setting_table.grid(row=1, column=0, sticky="nsew")
+        setting_table.grid(row=0, column=0, sticky="nsew")
 
-        setting_scroll = ttk.Scrollbar(container, orient="vertical", command=setting_table.yview)
-        setting_scroll.grid(row=1, column=1, sticky="ns")
+        setting_scroll = ttk.Scrollbar(setting_table_frame, orient="vertical", command=setting_table.yview)
+        setting_scroll.grid(row=0, column=1, sticky="ns")
+        setting_x_scroll = ttk.Scrollbar(setting_table_frame, orient="horizontal", command=setting_table.xview)
+        setting_x_scroll.grid(row=1, column=0, sticky="ew")
         setting_table.configure(yscrollcommand=setting_scroll.set)
+        setting_table.configure(xscrollcommand=setting_x_scroll.set)
 
         action_frame = ttk.Frame(container)
-        action_frame.grid(row=2, column=0, sticky="w", pady=(10, 0))
+        action_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        action_frame.columnconfigure(6, weight=1)
 
         def refresh_setting_table(select_name: Optional[str] = None) -> None:
             for item_id in setting_table.get_children():
                 setting_table.delete(item_id)
 
-            for name, config in type_mapping.items():
+            for name, config in draft_type_mapping.items():
                 row_id = setting_table.insert(
                     "",
                     "end",
@@ -1210,11 +1514,10 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             setting_icon_var.set(str(values[2]))
 
         def save_setting() -> None:
-            nonlocal loaded_type_name
+            nonlocal pending_loaded_type_name
             name = setting_name_var.get().strip()
             excel = setting_path_var.get().strip()
             icon = setting_icon_var.get().strip()
-            next_loaded_type_name = loaded_type_name
             save_action = "新增"
 
             if not name:
@@ -1227,7 +1530,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             selected = setting_table.selection()
             new_mapping = {
                 key: {"excel": value.get("excel", ""), "icon": value.get("icon", "")}
-                for key, value in type_mapping.items()
+                for key, value in draft_type_mapping.items()
             }
             if selected:
                 old_name = str(setting_table.item(selected[0], "values")[0]).strip()
@@ -1237,8 +1540,8 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
                     save_action = "更新"
                     if old_name in new_mapping:
                         del new_mapping[old_name]
-                    if loaded_type_name == old_name:
-                        next_loaded_type_name = name
+                    if pending_loaded_type_name == old_name:
+                        pending_loaded_type_name = name
                 elif name in new_mapping:
                     messagebox.showwarning("名称重复", "该名称已存在，请使用其他名称。", parent=settings_window)
                     return
@@ -1248,43 +1551,36 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
                     return
 
             new_mapping[name] = {"excel": excel, "icon": icon}
-            if not save_type_mapping_to_file(new_mapping):
-                return
-            type_mapping.clear()
-            type_mapping.update(new_mapping)
-            loaded_type_name = next_loaded_type_name
+            draft_type_mapping.clear()
+            draft_type_mapping.update(new_mapping)
+            mark_settings_dirty()
             refresh_setting_table(name)
-            refresh_type_options(name)
-            status_var.set(f"已{save_action}类型“{name}”")
+            status_var.set(f"已{save_action}类型“{name}”（待保存）")
 
         def delete_setting() -> None:
-            nonlocal loaded_type_name
+            nonlocal pending_loaded_type_name
             selected = setting_table.selection()
             if not selected:
                 messagebox.showwarning("未选择记录", "请先选择要删除的类型。", parent=settings_window)
                 return
 
             name = str(setting_table.item(selected[0], "values")[0]).strip()
-            next_loaded_type_name = loaded_type_name
             if not messagebox.askyesno("确认删除", f"确定删除类型“{name}”吗？", parent=settings_window):
                 return
 
             new_mapping = {
                 key: {"excel": value.get("excel", ""), "icon": value.get("icon", "")}
-                for key, value in type_mapping.items()
+                for key, value in draft_type_mapping.items()
             }
             if name in new_mapping:
                 del new_mapping[name]
-            if loaded_type_name == name:
-                next_loaded_type_name = ""
-            if not save_type_mapping_to_file(new_mapping):
-                return
-            type_mapping.clear()
-            type_mapping.update(new_mapping)
-            loaded_type_name = next_loaded_type_name
+            if pending_loaded_type_name == name:
+                pending_loaded_type_name = ""
+            draft_type_mapping.clear()
+            draft_type_mapping.update(new_mapping)
+            mark_settings_dirty()
             refresh_setting_table()
-            refresh_type_options()
-            status_var.set(f"已删除类型“{name}”")
+            status_var.set(f"已删除类型“{name}”（待保存）")
 
         def move_setting(direction: int) -> None:
             selected = setting_table.selection()
@@ -1293,7 +1589,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
                 return
 
             selected_name = str(setting_table.item(selected[0], "values")[0]).strip()
-            ordered_names = list(type_mapping.keys())
+            ordered_names = list(draft_type_mapping.keys())
             try:
                 current_index = ordered_names.index(selected_name)
             except ValueError:
@@ -1310,29 +1606,73 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
 
             reordered_mapping = {
                 name: {
-                    "excel": type_mapping.get(name, {}).get("excel", ""),
-                    "icon": type_mapping.get(name, {}).get("icon", ""),
+                    "excel": draft_type_mapping.get(name, {}).get("excel", ""),
+                    "icon": draft_type_mapping.get(name, {}).get("icon", ""),
                 }
                 for name in ordered_names
             }
 
-            if not save_type_mapping_to_file(reordered_mapping):
+            draft_type_mapping.clear()
+            draft_type_mapping.update(reordered_mapping)
+            mark_settings_dirty()
+            refresh_setting_table(select_name=selected_name)
+            move_action = "上移" if direction < 0 else "下移"
+            status_var.set(f"已{move_action}类型“{selected_name}”（待保存）")
+
+        def save_all_settings() -> None:
+            nonlocal loaded_type_name, original_title_text
+
+            title_text = setting_title_var.get().strip() or DEFAULT_MAIN_TITLE
+            previous_title_text = load_app_title_from_file()
+
+            def save_title() -> bool:
+                return save_app_title_to_file(title_text)
+
+            def save_mapping() -> bool:
+                return save_type_mapping_to_file(draft_type_mapping)
+
+            def rollback_title() -> bool:
+                rolled_back = save_app_title_to_file(previous_title_text)
+                if not rolled_back:
+                    messagebox.showwarning(
+                        "回滚失败",
+                        "类型配置保存失败，且标题回滚失败，请手动检查标题配置。",
+                        parent=settings_window,
+                    )
+                return rolled_back
+
+            if not save_settings_atomically(save_title, save_mapping, rollback_title):
                 return
 
             type_mapping.clear()
-            type_mapping.update(reordered_mapping)
-            refresh_setting_table(select_name=selected_name)
-            refresh_type_options(selected_name)
-            move_action = "上移" if direction < 0 else "下移"
-            status_var.set(f"已{move_action}类型“{selected_name}”")
+            type_mapping.update(draft_type_mapping)
+            loaded_type_name = pending_loaded_type_name
+            app_title_var.set(title_text)
+            original_title_text = title_text
+            refresh_type_options(type_var.get().strip() if type_var.get().strip() in type_mapping else None)
+            mark_settings_dirty(False)
+            status_var.set("设置已保存")
+
+        def close_settings_window() -> None:
+            if has_unsaved_changes:
+                should_close = messagebox.askyesno(
+                    "未保存更改",
+                    "检测到未保存的配置更改，确定不保存并关闭吗？",
+                    parent=settings_window,
+                )
+                if not should_close:
+                    return
+            settings_window.destroy()
 
         ttk.Button(action_frame, text="新增/更新", command=save_setting).grid(row=0, column=0)
         ttk.Button(action_frame, text="删除", command=delete_setting).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(action_frame, text="上移", command=lambda: move_setting(-1)).grid(row=0, column=2, padx=(8, 0))
         ttk.Button(action_frame, text="下移", command=lambda: move_setting(1)).grid(row=0, column=3, padx=(8, 0))
-        ttk.Button(action_frame, text="关闭", command=settings_window.destroy).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(action_frame, text="保存", command=save_all_settings).grid(row=0, column=7, padx=(8, 0), sticky="e")
+        ttk.Button(action_frame, text="关闭", command=close_settings_window).grid(row=0, column=8, padx=(8, 0), sticky="e")
 
         setting_table.bind("<<TreeviewSelect>>", on_setting_row_select)
+        settings_window.protocol("WM_DELETE_WINDOW", close_settings_window)
         refresh_setting_table()
 
     def run_query() -> None:
@@ -1351,7 +1691,13 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
             return
 
         candidate_indexes = get_candidate_indexes(query_indexes, conditions)
-        results = query_records(records, conditions, candidate_indexes=candidate_indexes)
+        results = query_records(
+            records,
+            conditions,
+            candidate_indexes=candidate_indexes,
+            fuzzy_fields=fuzzy_query_fields,
+            normalized_rows=normalized_query_rows,
+        )
         render_rows(results)
 
         if results:
@@ -1364,8 +1710,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         for value_var in query_vars.values():
             value_var.set("")
 
-    ttk.Button(top_frame, text="加载", command=load_data).grid(row=1, column=2, padx=(8, 0))
-    ttk.Button(top_frame, text="设置", command=open_settings_window).grid(row=1, column=3, padx=(8, 0))
+    ttk.Button(type_control_frame, text="加载", command=load_data).grid(row=1, column=2, sticky="w", padx=(8, 0))
     ttk.Button(query_frame, text="清除", command=clear_query_inputs).grid(row=0, column=1, padx=(8, 0), sticky="w")
     ttk.Button(query_frame, text="查询", command=run_query, style="Query.TButton").grid(row=0, column=2, padx=(8, 0), sticky="w")
 
@@ -1381,7 +1726,8 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         type_mapping.update(loaded_mapping)
         if config_warning:
             messagebox.showwarning("配置加载提醒", config_warning)
-        refresh_type_options()
+        app_title_var.set(load_app_title_from_file())
+        refresh_type_options(delay_icon_ms=DEFERRED_STARTUP_ICON_DELAY_MS)
 
         # 若启动时尝试过命令行参数加载（无论成功或失败），
         # 保留 load_data_from_path 给出的状态提示，不被异步初始化覆盖。
@@ -1398,6 +1744,7 @@ def launch_gui(default_excel: Path, prefer_default_excel: bool = False) -> None:
         load_data_from_path(default_excel, "命令行参数")
 
     root.after_idle(apply_window_icon)
+    root.after_idle(apply_settings_button_icon)
     root.after_idle(initialize_type_mapping)
 
     root.mainloop()
@@ -1459,7 +1806,8 @@ def main() -> None:
 
     if query_conditions is not None:
         headers, records = load_records(excel_path)
-        results = query_records(records, query_conditions)
+        fuzzy_fields = get_fuzzy_query_fields(headers)
+        results = query_records(records, query_conditions, fuzzy_fields=fuzzy_fields)
         print_results(headers, results)
     elif args.cli:
         headers, records = load_records(excel_path)

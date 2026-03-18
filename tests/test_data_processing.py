@@ -15,6 +15,7 @@ import retrieval_tool
 from retrieval_tool import (
     build_query_indexes,
     dump_signed_type_mapping,
+    get_fuzzy_query_fields,
     get_preferred_config_path,
     get_icon_subsample_scale,
     get_candidate_indexes,
@@ -24,10 +25,65 @@ from retrieval_tool import (
     load_type_mapping_with_status,
     normalize_value,
     query_records,
+    save_settings_atomically,
 )
 
 
 class TestDataProcessing(unittest.TestCase):
+    def test_save_settings_atomically_success(self):
+        calls = []
+
+        def save_title() -> bool:
+            calls.append("title")
+            return True
+
+        def save_mapping() -> bool:
+            calls.append("mapping")
+            return True
+
+        def rollback_title() -> bool:
+            calls.append("rollback")
+            return True
+
+        self.assertTrue(save_settings_atomically(save_title, save_mapping, rollback_title))
+        self.assertEqual(calls, ["title", "mapping"])
+
+    def test_save_settings_atomically_fail_on_title(self):
+        calls = []
+
+        def save_title() -> bool:
+            calls.append("title")
+            return False
+
+        def save_mapping() -> bool:
+            calls.append("mapping")
+            return True
+
+        def rollback_title() -> bool:
+            calls.append("rollback")
+            return True
+
+        self.assertFalse(save_settings_atomically(save_title, save_mapping, rollback_title))
+        self.assertEqual(calls, ["title"])
+
+    def test_save_settings_atomically_rolls_back_title(self):
+        calls = []
+
+        def save_title() -> bool:
+            calls.append("title")
+            return True
+
+        def save_mapping() -> bool:
+            calls.append("mapping")
+            return False
+
+        def rollback_title() -> bool:
+            calls.append("rollback")
+            return True
+
+        self.assertFalse(save_settings_atomically(save_title, save_mapping, rollback_title))
+        self.assertEqual(calls, ["title", "mapping", "rollback"])
+
     def test_get_query_headers(self):
         headers = ["序号", "/A", "直径", "长度", "/B"]
         self.assertEqual(get_query_headers(headers), ["直径", "长度"])
@@ -48,6 +104,24 @@ class TestDataProcessing(unittest.TestCase):
         results = query_records(records, {"直径": "20", "长度": "1200"}, candidate_indexes=candidates)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["/A"], "A")
+
+    def test_get_fuzzy_query_fields_from_key_ranges(self):
+        headers = ["序号", "/A", "/C", "材质", "规格", "/D", "直径", "长度", "/B"]
+        self.assertEqual(get_fuzzy_query_fields(headers), {"材质", "规格"})
+
+    def test_get_fuzzy_query_fields_rejects_cross_ranges(self):
+        headers = ["序号", "/A", "/C", "材质", "/E", "等级", "/D", "直径", "/F", "/B"]
+        with self.assertRaisesRegex(ValueError, "不能交叉"):
+            get_fuzzy_query_fields(headers)
+
+    def test_query_records_supports_fuzzy_contains(self):
+        records = [
+            {"材质": "304不锈钢", "规格": "M10", "直径": "20"},
+            {"材质": "碳钢", "规格": "M12", "直径": "20"},
+        ]
+        results = query_records(records, {"材质": "不锈"}, fuzzy_fields={"材质"})
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["规格"], "M10")
 
     def test_get_icon_subsample_scale_boundary(self):
         self.assertEqual(get_icon_subsample_scale(120, 120, 120), 1)
@@ -74,6 +148,20 @@ class TestDataProcessing(unittest.TestCase):
             headers, records = load_records(excel_path)
             self.assertEqual(headers, ["序号", "/A", "直径", "长度", "/B"])
             self.assertEqual(records[0]["/A"], "037332314020")
+
+    @unittest.skipIf(Workbook is None, "openpyxl is not installed")
+    def test_load_records_rejects_fuzzy_keys_outside_main_range(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            excel_path = Path(tmp_dir) / "invalid_fuzzy_range.xlsx"
+            wb = Workbook()
+            ws = wb.active
+            ws.append(["序号", "/C", "材质", "/D", "/A", "直径", "/B"])
+            ws.append([1, "", "304", "", "A001", "20", "项目A"])
+            wb.save(excel_path)
+            wb.close()
+
+            with self.assertRaisesRegex(ValueError, "标题位置错误"):
+                load_records(excel_path)
 
     def test_config_loader_compat_and_fallback(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
